@@ -21,11 +21,26 @@ uint64_t hashFile(const fs::path& path) {
     return hash;
 }
 
-// Turn the 64-bit hash into a 16-char hex string
 std::string toHex(uint64_t value) {
     std::stringstream ss;
     ss << std::hex << std::setw(16) << std::setfill('0') << value;
     return ss.str();
+}
+
+// NEW: look up a file's stored hash. Returns "" if it's not in the DB yet.
+std::string getStoredHash(sqlite3* db, const std::string& filename) {
+    const char* sql = "SELECT hash FROM files WHERE filename = ?;";
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, filename.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::string result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {           // a matching row exists
+        const unsigned char* text = sqlite3_column_text(stmt, 0);
+        if (text) result = reinterpret_cast<const char*>(text);
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 int main(int argc, char* argv[]) {
@@ -55,17 +70,12 @@ int main(int argc, char* argv[]) {
         sqlite3_close(db);
         return 1;
     }
-    std::cout << "Database ready. Scanning: " << folder << std::endl;
+    std::cout << "Scanning: " << folder << std::endl;
 
-    // NEW: prepare the INSERT once, with ? placeholders
     const char* insertSql =
         "INSERT OR REPLACE INTO files (filename, hash, size) VALUES (?, ?, ?);";
     sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db, insertSql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Prepare failed: " << sqlite3_errmsg(db) << std::endl;
-        sqlite3_close(db);
-        return 1;
-    }
+    sqlite3_prepare_v2(db, insertSql, -1, &stmt, nullptr);
 
     for (const auto& entry : fs::directory_iterator(folder)) {
         if (entry.is_regular_file()) {
@@ -73,22 +83,26 @@ int main(int argc, char* argv[]) {
             std::string hash = toHex(hashFile(entry.path()));
             long long   size = entry.file_size();
 
-            // NEW: fill the ? placeholders (they're numbered from 1)
+            // NEW: compare against what we stored last time
+            std::string stored = getStoredHash(db, name);
+            if (stored.empty()) {
+                std::cout << "  [NEW]      " << name << std::endl;
+            } else if (stored != hash) {
+                std::cout << "  [MODIFIED] " << name << std::endl;
+            } else {
+                std::cout << "  [OK]       " << name << std::endl;
+            }
+
+            // update the baseline with the current state
             sqlite3_bind_text (stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text (stmt, 2, hash.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt, 3, size);
-
-            // NEW: run it, then reset so we can reuse it for the next file
-            if (sqlite3_step(stmt) != SQLITE_DONE) {
-                std::cerr << "Insert failed: " << sqlite3_errmsg(db) << std::endl;
-            }
+            sqlite3_step(stmt);
             sqlite3_reset(stmt);
-
-            std::cout << "  stored " << name << "  (" << size << " bytes, " << hash << ")" << std::endl;
         }
     }
 
-    sqlite3_finalize(stmt);   // NEW: release the prepared statement
+    sqlite3_finalize(stmt);
     sqlite3_close(db);
     return 0;
 }
