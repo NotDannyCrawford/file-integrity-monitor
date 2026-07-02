@@ -1,0 +1,6 @@
+build/
+*.o
+*.out
+*.dSYM/
+.DS_Store
+fim
