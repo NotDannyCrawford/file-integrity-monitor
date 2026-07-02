@@ -4,3 +4,4 @@ build/
 *.dSYM/
 .DS_Store
 fim
+*.db
