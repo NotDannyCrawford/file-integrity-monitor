@@ -5,14 +5,17 @@
 #include <cstdint>
 #include <sstream>
 #include <iomanip>
+#include <set>
+#include <vector>
 #include <sqlite3.h>
 
 namespace fs = std::filesystem;
 
+// Compute a 64-bit FNV-1a hash of a file's bytes.
 uint64_t hashFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
-    uint64_t hash = 14695981039346656037ULL;
-    const uint64_t prime = 1099511628211ULL;
+    uint64_t hash = 14695981039346656037ULL;   // FNV offset basis
+    const uint64_t prime = 1099511628211ULL;    // FNV prime
     char byte;
     while (file.get(byte)) {
         hash ^= static_cast<unsigned char>(byte);
@@ -21,13 +24,14 @@ uint64_t hashFile(const fs::path& path) {
     return hash;
 }
 
+// Turn the 64-bit hash into a 16-char hex string.
 std::string toHex(uint64_t value) {
     std::stringstream ss;
     ss << std::hex << std::setw(16) << std::setfill('0') << value;
     return ss.str();
 }
 
-// NEW: look up a file's stored hash. Returns "" if it's not in the DB yet.
+// Look up a file's stored hash. Returns "" if it's not in the DB yet.
 std::string getStoredHash(sqlite3* db, const std::string& filename) {
     const char* sql = "SELECT hash FROM files WHERE filename = ?;";
     sqlite3_stmt* stmt;
@@ -77,13 +81,16 @@ int main(int argc, char* argv[]) {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(db, insertSql, -1, &stmt, nullptr);
 
+    std::set<std::string> seen;   // track which files exist on disk this scan
+
     for (const auto& entry : fs::directory_iterator(folder)) {
         if (entry.is_regular_file()) {
             std::string name = entry.path().filename().string();
             std::string hash = toHex(hashFile(entry.path()));
             long long   size = entry.file_size();
+            seen.insert(name);
 
-            // NEW: compare against what we stored last time
+            // compare against the stored baseline
             std::string stored = getStoredHash(db, name);
             if (stored.empty()) {
                 std::cout << "  [NEW]      " << name << std::endl;
@@ -101,8 +108,34 @@ int main(int argc, char* argv[]) {
             sqlite3_reset(stmt);
         }
     }
-
     sqlite3_finalize(stmt);
+
+    // Detect DELETED files: in the baseline, but not seen on disk this scan.
+    const char* selectAll = "SELECT filename FROM files;";
+    sqlite3_stmt* selStmt;
+    sqlite3_prepare_v2(db, selectAll, -1, &selStmt, nullptr);
+
+    std::vector<std::string> deleted;
+    while (sqlite3_step(selStmt) == SQLITE_ROW) {
+        std::string dbName = reinterpret_cast<const char*>(sqlite3_column_text(selStmt, 0));
+        if (seen.find(dbName) == seen.end()) {        // in DB, gone from disk
+            std::cout << "  [DELETED]  " << dbName << std::endl;
+            deleted.push_back(dbName);
+        }
+    }
+    sqlite3_finalize(selStmt);
+
+    // Remove the deleted files from the baseline so it reflects current reality.
+    const char* delSql = "DELETE FROM files WHERE filename = ?;";
+    sqlite3_stmt* delStmt;
+    sqlite3_prepare_v2(db, delSql, -1, &delStmt, nullptr);
+    for (const auto& name : deleted) {
+        sqlite3_bind_text(delStmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(delStmt);
+        sqlite3_reset(delStmt);
+    }
+    sqlite3_finalize(delStmt);
+
     sqlite3_close(db);
     return 0;
 }
