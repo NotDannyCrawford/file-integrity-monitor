@@ -12,6 +12,7 @@ On each run it walks a directory, hashes every file, and compares the result to 
 | `[MODIFIED]` | a file whose contents changed (its hash differs) |
 | `[DELETED]` | a file that was in the baseline but is now gone |
 | `[OK]` | unchanged since last scan |
+| `[SKIPPED]` | a file that couldn't be read (its baseline entry is left untouched) |
 
 The baseline lives in a local SQLite database, so the tool "remembers" state between runs.
 
@@ -52,6 +53,7 @@ g++ -std=c++17 main.cpp -o fim -lsqlite3
 
 - **FNV-1a** keeps the tool dependency-free and easy to read. A security-hardened version would use a cryptographic hash like **SHA-256** so an attacker couldn't deliberately forge a file with a matching fingerprint.
 - The baseline is stored in `baseline.db`, which is git-ignored since it's generated data.
+- Every SQL prepare is checked, statement pointers start at `nullptr`, and unreadable files are reported rather than silently mis-hashed.
 
 ## Possible next steps
 
